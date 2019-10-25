@@ -19,8 +19,10 @@ using Arbor.Exceptions;
 using Arbor.KVConfiguration.Core.Metadata;
 using Arbor.KVConfiguration.Schema.Json;
 using Arbor.Processing;
-using Arbor.Xdt;
 using JetBrains.Annotations;
+
+using Microsoft.Web.XmlTransform;
+
 using NuGet.Versioning;
 using Serilog;
 using Serilog.Core;
@@ -388,7 +390,7 @@ namespace Arbor.Build.Core.Tools.MSBuild
         {
             var platforms = new List<string>();
 
-            await using (var fs = new FileStream(solutionFile.FullName, FileMode.Open, FileAccess.Read))
+            using (var fs = new FileStream(solutionFile.FullName, FileMode.Open, FileAccess.Read))
             {
                 using var streamReader = new StreamReader(fs);
                 bool isInGlobalSection = false;
@@ -727,7 +729,7 @@ namespace Arbor.Build.Core.Tools.MSBuild
                     WellKnownVariables.DotNetPublishExeProjectsEnabled);
 
                 ExitCode webAppsExitCode =
-                    await PublishDotNetExeProjectsAsync(solutionFile, configuration, logger)
+                    await PublishDotNetProjectsAsync(solutionFile, configuration, logger)
                         .ConfigureAwait(false);
 
                 exitCode = webAppsExitCode;
@@ -741,11 +743,16 @@ namespace Arbor.Build.Core.Tools.MSBuild
             return exitCode;
         }
 
-        private async Task<ExitCode> PublishDotNetExeProjectsAsync(
+        private async Task<ExitCode> PublishDotNetProjectsAsync(
             FileInfo solutionFile,
             string configuration,
             ILogger logger)
         {
+            bool HasPublishPackageEnabled(SolutionProject project)
+            {
+                return project.Project.HasPropertyWithValue("GeneratePackageOnBuild", "true");
+            }
+
             if (string.IsNullOrWhiteSpace(_dotNetExePath))
             {
                 logger.Warning("dotnet could not be found, skipping publishing dotnet exe projects");
@@ -756,7 +763,7 @@ namespace Arbor.Build.Core.Tools.MSBuild
 
             const string sdkTestPackageId = "Microsoft.NET.Test.Sdk";
 
-            ImmutableArray<SolutionProject> exeProjects = solution.Projects
+            ImmutableArray<SolutionProject> publishProjects = solution.Projects
                 .Where(project =>
                     project.NetFrameworkGeneration == NetFrameworkGeneration.NetCoreApp
                     && (project.Project.HasPropertyWithValue("ArborPublishEnabled", "true") ||
@@ -764,12 +771,13 @@ namespace Arbor.Build.Core.Tools.MSBuild
                             msBuildPropertyGroup.Properties.Any(msBuildProperty =>
                                 msBuildProperty.Name.Equals("ArborPublishEnabled", StringComparison.Ordinal))))
                     && (project.Project.HasPropertyWithValue("OutputType", "Exe")
-                        || project.Project.Sdk == DotNetSdk.DotnetWeb)
+                        || project.Project.Sdk == DotNetSdk.DotnetWeb
+                        || HasPublishPackageEnabled(project))
                     && !project.Project.PackageReferences.Any(reference =>
                         sdkTestPackageId.Equals(reference.Package, StringComparison.OrdinalIgnoreCase)))
                 .ToImmutableArray();
 
-            foreach (SolutionProject solutionProject in exeProjects)
+            foreach (SolutionProject solutionProject in publishProjects)
             {
                 if (solutionProject.Project.HasPropertyWithValue(WellKnownVariables.DotNetPublishExeEnabled, "false"))
                 {
@@ -793,20 +801,83 @@ namespace Arbor.Build.Core.Tools.MSBuild
                     "/nodeReuse:false"
                 };
 
-                if (!string.IsNullOrWhiteSpace(_publishRuntimeIdentifier))
+                var packageLookupDirectories = new List<DirectoryInfo>();
+
+                DirectoryInfo tempDirectory = default;
+
+                bool isReleaseBuild = configuration.Equals("release", StringComparison.OrdinalIgnoreCase);
+
+                string packageVersion = GetPackageVersion(isReleaseBuild);
+
+                try
                 {
-                    args.Add("-r");
-                    args.Add(_publishRuntimeIdentifier);
+                    if (HasPublishPackageEnabled(solutionProject))
+                    {
+                        args.Add($"/p:version={packageVersion}");
+                        args.Add("--output");
+
+                        var tempDirPath = Path.Combine(Path.GetTempPath(), "Arbor.Build-pkg" + DateTime.UtcNow.Ticks);
+                        tempDirectory = new DirectoryInfo(tempDirPath);
+                        tempDirectory.EnsureExists();
+
+                        packageLookupDirectories.Add(new DirectoryInfo(solutionProject.ProjectDirectory));
+                        packageLookupDirectories.Add(tempDirectory);
+
+                        args.Add(tempDirectory.FullName);
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(_publishRuntimeIdentifier))
+                    {
+                        args.Add("-r");
+                        args.Add(_publishRuntimeIdentifier);
+                    }
+
+                    ExitCode projectExitCode = await ProcessHelper.ExecuteAsync(
+                                                   _dotNetExePath,
+                                                   args,
+                                                   logger,
+                                                   cancellationToken: _cancellationToken).ConfigureAwait(false);
+
+                    if (!projectExitCode.IsSuccess)
+                    {
+                        return projectExitCode;
+                    }
                 }
-
-                ExitCode projectExitCode = await ProcessHelper.ExecuteAsync(_dotNetExePath,
-                    args,
-                    logger,
-                    cancellationToken: _cancellationToken).ConfigureAwait(false);
-
-                if (!projectExitCode.IsSuccess)
+                finally
                 {
-                    return projectExitCode;
+                    _ = new DirectoryInfo(_packagesDirectory).EnsureExists();
+
+                    foreach (var lookupDirectory in packageLookupDirectories)
+                    {
+                        if (lookupDirectory != null)
+                        {
+                            lookupDirectory.Refresh();
+
+                            if (lookupDirectory.Exists)
+                            {
+                                var nugetPackages = lookupDirectory.GetFiles($"*{packageVersion}.nupkg", SearchOption.AllDirectories);
+
+                                foreach (var nugetPackage in nugetPackages)
+                                {
+                                    string targetFile = Path.Combine(_packagesDirectory, nugetPackage.Name);
+
+                                    if (!File.Exists(targetFile))
+                                    {
+                                        nugetPackage.CopyTo(targetFile);
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    try
+                    {
+                        tempDirectory.DeleteIfExists(true);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.Warning(ex, "Could not remove directory {Directory}", tempDirectory?.FullName);
+                    }
                 }
             }
 
@@ -837,13 +908,7 @@ namespace Arbor.Build.Core.Tools.MSBuild
 
             bool isReleaseBuild = configuration.Equals("release", StringComparison.OrdinalIgnoreCase);
 
-            string packageVersion = SemanticVersion.Parse(NuGetVersionHelper.GetVersion(_version,
-                isReleaseBuild,
-                _buildSuffix,
-                true,
-                "", // TODO add support for metadata
-                _logger,
-                NuGetVersioningSettings.Default)).ToNormalizedString();
+            string packageVersion = GetPackageVersion(isReleaseBuild);
 
             foreach (SolutionProject solutionProject in exeProjects)
             {
@@ -871,6 +936,21 @@ namespace Arbor.Build.Core.Tools.MSBuild
             }
 
             return ExitCode.Success;
+        }
+
+        private string GetPackageVersion(bool isReleaseBuild)
+        {
+            string packageVersion = SemanticVersion.Parse(
+                NuGetVersionHelper.GetVersion(
+                    _version,
+                    isReleaseBuild,
+                    _buildSuffix,
+                    true,
+                    "", // TODO add support for metadata
+                    _logger,
+                    NuGetVersioningSettings.Default)).ToNormalizedString();
+
+            return packageVersion;
         }
 
         private void CopyCodeAnalysisReportsToArtifacts(string configuration, string platform, ILogger logger)
@@ -1717,7 +1797,7 @@ namespace Arbor.Build.Core.Tools.MSBuild
             string tags = string.Empty;
 
             string files = string.Join(Environment.NewLine,
-                filesList.Select(file => NuSpecHelper.IncludedFile(file, baseDirectory.FullName)));
+                filesList.Select(file => NuSpecHelper.IncludedFile(file, baseDirectory.FullName, _logger)));
 
             FileListWithChecksumFile contentFilesInfo = ChecksumHelper.CreateFileListForDirectory(baseDirectory);
 
@@ -1816,7 +1896,7 @@ namespace Arbor.Build.Core.Tools.MSBuild
                 .GetFilesRecursive(extensions)
                 .Where(
                     file =>
-                        !_pathLookupSpecification.IsBlackListed(file.DirectoryName).Item1
+                        !_pathLookupSpecification.IsNotAllowed(file.DirectoryName).Item1
                         && !_pathLookupSpecification.IsFileExcluded(file.FullName, _vcsRoot).Item1)
                 .Where(
                     file =>
@@ -2115,7 +2195,7 @@ namespace Arbor.Build.Core.Tools.MSBuild
                 if (_debugLoggingEnabled)
                 {
                     logger.Debug(
-                        "Skipping directory '{FullName}' when searching for solution files because the directory is blacklisted, {Item2}",
+                        "Skipping directory '{FullName}' when searching for solution files because the directory is notallowed, {Item2}",
                         directoryInfo.FullName,
                         isBlacklisted.Item2);
                 }
@@ -2136,7 +2216,7 @@ namespace Arbor.Build.Core.Tools.MSBuild
         private (bool, string) IsBlacklisted(DirectoryInfo directoryInfo)
         {
             (bool, string) isBlacklistedByName =
-                _pathLookupSpecification.IsBlackListed(directoryInfo.FullName, _vcsRoot);
+                _pathLookupSpecification.IsNotAllowed(directoryInfo.FullName, _vcsRoot);
 
             if (isBlacklistedByName.Item1)
             {
@@ -2146,9 +2226,9 @@ namespace Arbor.Build.Core.Tools.MSBuild
             FileAttributes[] blackListedByAttributes = _blackListedByAttributes.Where(
                 blackListed => (directoryInfo.Attributes & blackListed) != 0).ToArray();
 
-            bool isBlackListedByAttributes = blackListedByAttributes.Length > 0;
+            bool isNotAllowedByAttributes = blackListedByAttributes.Length > 0;
 
-            return (isBlackListedByAttributes, isBlackListedByAttributes
+            return (isNotAllowedByAttributes, isNotAllowedByAttributes
                 ? $"Directory has black-listed attributes {string.Join(", ", blackListedByAttributes.Select(_ => Enum.GetName(typeof(FileAttributes), _)))}"
                 : string.Empty);
         }

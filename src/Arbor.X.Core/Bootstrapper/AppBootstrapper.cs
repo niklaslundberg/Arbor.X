@@ -6,7 +6,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Management;
-using System.Net.Http;
+using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
 using Arbor.Aesculus.Core;
@@ -22,9 +22,7 @@ using Arbor.Exceptions;
 using Arbor.Processing;
 using Arbor.Tooler;
 using JetBrains.Annotations;
-using NuGet.Versioning;
 using Serilog;
-using Serilog.Events;
 
 namespace Arbor.Build.Core.Bootstrapper
 {
@@ -32,18 +30,18 @@ namespace Arbor.Build.Core.Bootstrapper
     {
         private const string BuildToolPackageName = ArborConstants.ArborBuild;
         private const int MaxBuildTimeInSeconds = 600;
-        private static readonly string _Prefix = $"[{ArborConstants.ArborBuild}.{nameof(AppBootstrapper)}] ";
+        private static readonly string Prefix = $"[{ArborConstants.ArborBuild}.{nameof(AppBootstrapper)}] ";
         private readonly ILogger _logger;
         private bool _directoryCloneEnabled;
 
         private bool _failed;
-        private BootstrapStartOptions _startOptions;
+        private BootstrapStartOptions? _startOptions;
 
         public AppBootstrapper(ILogger logger) => _logger = logger;
 
         public async Task<ExitCode> StartAsync(string[] args)
         {
-            _logger.Information("Running Arbor.X Bootstrapper process id {ProcessId}, executable {Executable}",
+            _logger.Information("Running Arbor.Build Bootstrapper process id {ProcessId}, executable {Executable}",
                 Process.GetCurrentProcess().Id,
                 typeof(AppBootstrapper).Assembly.Location);
 
@@ -91,18 +89,18 @@ namespace Arbor.Build.Core.Bootstrapper
             {
                 stopwatch.Stop();
                 exitCode = ExitCode.Failure;
-                _logger.Error(ex, "{Prefix}", _Prefix);
+                _logger.Error(ex, "{Prefix}", Prefix);
 
                 foreach (Exception innerEx in ex.InnerExceptions)
                 {
-                    _logger.Error(innerEx, "{Prefix}", _Prefix);
+                    _logger.Error(innerEx, "{Prefix}", Prefix);
                 }
             }
             catch (Exception ex)
             {
                 stopwatch.Stop();
                 exitCode = ExitCode.Failure;
-                _logger.Error(ex, "{Prefix} Could not start process", _Prefix);
+                _logger.Error(ex, "{Prefix} Could not start process", Prefix);
             }
 
             _ = Environment.GetEnvironmentVariable(WellKnownVariables.BootstrapperExitDelayInMilliseconds)
@@ -118,7 +116,7 @@ namespace Arbor.Build.Core.Bootstrapper
             }
 
             _logger.Information(
-                "Arbor.X.Bootstrapper total inclusive Arbor.X.Build elapsed time in seconds: {ElapsedSeconds}",
+                "Arbor.Build.Bootstrapper total inclusive Arbor.Build elapsed time in seconds: {ElapsedSeconds}",
                 stopwatch.Elapsed.TotalSeconds.ToString("F", CultureInfo.InvariantCulture));
 
             return exitCode;
@@ -207,25 +205,25 @@ namespace Arbor.Build.Core.Bootstrapper
 
         private void WriteDebug(string message)
         {
-            Debug.WriteLine(_Prefix + message);
-            _logger.Debug("{Prefix}{Message}", _Prefix, message);
+            Debug.WriteLine(Prefix + message);
+            _logger.Debug("{Prefix}{Message}", Prefix, message);
         }
 
         private void SetEnvironmentVariables()
         {
-            if (!string.IsNullOrWhiteSpace(_startOptions.BaseDir) && Directory.Exists(_startOptions.BaseDir))
+            if (!string.IsNullOrWhiteSpace(_startOptions?.BaseDir) && Directory.Exists(_startOptions.BaseDir))
             {
                 Environment.SetEnvironmentVariable(WellKnownVariables.SourceRoot, _startOptions.BaseDir);
             }
 
-            if (_startOptions.PreReleaseEnabled.HasValue)
+            if (_startOptions?.PreReleaseEnabled == true)
             {
                 Environment.SetEnvironmentVariable(
                     WellKnownVariables.AllowPrerelease,
-                    _startOptions.PreReleaseEnabled.Value.ToString(CultureInfo.InvariantCulture).ToLowerInvariant());
+                    _startOptions!.PreReleaseEnabled!.Value.ToString(CultureInfo.InvariantCulture).ToLowerInvariant());
             }
 
-            if (!string.IsNullOrWhiteSpace(_startOptions.BranchName))
+            if (!string.IsNullOrWhiteSpace(_startOptions?.BranchName))
             {
                 Environment.SetEnvironmentVariable(WellKnownVariables.BranchName, _startOptions.BranchName);
             }
@@ -233,7 +231,11 @@ namespace Arbor.Build.Core.Bootstrapper
 
         private async Task<ExitCode> TryStartAsync(BootstrapStartOptions startOptions)
         {
-            _logger.Information("Starting Arbor.Build Bootstrapper");
+            var assembly = Assembly.GetExecutingAssembly();
+            var fileVersionInfo = FileVersionInfo.GetVersionInfo(assembly.Location);
+            string version = fileVersionInfo.FileVersion;
+
+            _logger.Information("Starting Arbor.Build Bootstrapper version {Version}", version);
 
             string directoryCloneValue = Environment.GetEnvironmentVariable(WellKnownVariables.DirectoryCloneEnabled);
 
@@ -255,36 +257,11 @@ namespace Arbor.Build.Core.Bootstrapper
 
             _logger.Verbose("Using base directory '{BaseDir}'", baseDir);
 
-            string customNuGetPath =
-                Environment.GetEnvironmentVariable(WellKnownVariables.ExternalTools_NuGet_ExePath_Custom);
-
-            string nugetExePath;
-
-            if (!string.IsNullOrWhiteSpace(customNuGetPath) && File.Exists(customNuGetPath))
-            {
-                nugetExePath = customNuGetPath;
-            }
-            else
-            {
-                _logger.Debug("Downloading NuGet");
-                using var httpClient = new HttpClient();
-                var nuGetDownloadClient = new NuGetDownloadClient();
-                NuGetDownloadResult nuGetDownloadResult = await nuGetDownloadClient.DownloadNuGetAsync(NuGetDownloadSettings.Default, _logger, httpClient).ConfigureAwait(false);
-
-                if (!nuGetDownloadResult.Succeeded)
-                {
-                    _logger.Error("Could not download nuget.exe");
-                    return ExitCode.Failure;
-                }
-
-                nugetExePath = nuGetDownloadResult.NuGetExePath;
-            }
-
             _logger.Debug("Downloading nuget package {Package}", BuildToolPackageName);
-            string outputDirectoryPath =
-                await DownloadNuGetPackageAsync(buildDir.FullName, nugetExePath).ConfigureAwait(false);
+            string buildToolsDirectory =
+                await DownloadNuGetPackageAsync().ConfigureAwait(false);
 
-            if (string.IsNullOrWhiteSpace(outputDirectoryPath))
+            if (string.IsNullOrWhiteSpace(buildToolsDirectory))
             {
                 return ExitCode.Failure;
             }
@@ -300,7 +277,7 @@ namespace Arbor.Build.Core.Bootstrapper
                 else
                 {
                     ExitCode buildToolsResult =
-                        await RunBuildToolsAsync(buildDir.FullName, outputDirectoryPath).ConfigureAwait(false);
+                        await RunBuildToolsAsync(buildDir.FullName, buildToolsDirectory).ConfigureAwait(false);
 
                     if (buildToolsResult.IsSuccess)
                     {
@@ -339,193 +316,59 @@ namespace Arbor.Build.Core.Bootstrapper
             return exitCode;
         }
 
-        private async Task<string> DownloadNuGetPackageAsync(string buildDir, string nugetExePath)
+        private async Task<string> DownloadNuGetPackageAsync()
         {
-            string outputDirectoryPath = Path.Combine(buildDir, BuildToolPackageName);
-
-            var outputDirectory = new DirectoryInfo(outputDirectoryPath);
-
-            _ = Environment.GetEnvironmentVariable(WellKnownVariables.NuGetReinstallArborPackageEnabled)
-                .TryParseBool(out bool reinstallEnabled, true);
-
-            bool reinstall = !outputDirectory.Exists || reinstallEnabled;
-
-            if (!reinstall)
-            {
-                return outputDirectoryPath;
-            }
-
-            outputDirectory.DeleteIfExists();
-            outputDirectory.EnsureExists();
-
             string? version = Environment.GetEnvironmentVariable(WellKnownVariables.ArborBuildNuGetPackageVersion);
 
-            string? nuGetSource = Environment.GetEnvironmentVariable(WellKnownVariables.ArborXNuGetPackageSource);
+            string? nuGetSource = Environment.GetEnvironmentVariable(WellKnownVariables.ArborBuildNuGetPackageSource);
 
             _ = Environment.GetEnvironmentVariable(WellKnownVariables.AllowPrerelease)
                 .TryParseBool(out bool preReleaseIsAllowed);
 
             preReleaseIsAllowed = _startOptions.PreReleaseEnabled ?? preReleaseIsAllowed;
 
-            if (string.IsNullOrWhiteSpace(version))
+            bool parsedPackageVersion = NuGetPackageVersion.TryParse(version, out NuGetPackageVersion packageVersion);
+
+            if (!parsedPackageVersion)
             {
-                version = await GetLatestVersionAsync(nugetExePath, nuGetSource, preReleaseIsAllowed).ConfigureAwait(false);
+                packageVersion = NuGetPackageVersion.LatestAvailable;
             }
 
-            var nugetArguments = new List<string>
-            {
-                "install",
-                BuildToolPackageName,
-                "-ExcludeVersion",
-                "-OutputDirectory",
-                buildDir.TrimEnd('\\')
-            };
+            var nuGetPackageInstaller = new NuGetPackageInstaller(logger: _logger);
 
-            if (_logger.IsEnabled(LogEventLevel.Verbose))
+            var nuGetPackage = new NuGetPackage(
+                new NuGetPackageId(BuildToolPackageName),
+                packageVersion);
+
+            var nugetPackageSettings = new NugetPackageSettings(preReleaseIsAllowed, nuGetSource);
+
+            var nuGetPackageInstallResult = await nuGetPackageInstaller.InstallPackageAsync(
+                    nuGetPackage,
+                    nugetPackageSettings)
+                .ConfigureAwait(false);
+
+            if (nuGetPackageInstallResult?.SemanticVersion is null)
             {
-                nugetArguments.Add("-Verbosity");
-                nugetArguments.Add("detailed");
+                _logger.Warning("Could not download {PackageVersion}", packageVersion);
             }
 
-            if (!string.IsNullOrWhiteSpace(nuGetSource))
+            if (!parsedPackageVersion
+                && nuGetPackageInstallResult?.SemanticVersion is null
+                && nuGetPackage.NuGetPackageVersion != NuGetPackageVersion.LatestDownloaded)
             {
-                nugetArguments.Add("-Source");
-                nugetArguments.Add(nuGetSource);
-            }
-
-            string noCache = Environment.GetEnvironmentVariable(WellKnownVariables.ArborXNuGetPackageNoCacheEnabled);
-
-            _ = noCache.TryParseBool(out bool noCacheEnabled);
-
-            if (noCacheEnabled)
-            {
-                nugetArguments.Add("-NoCache");
-            }
-
-            if (!string.IsNullOrWhiteSpace(version))
-            {
-                nugetArguments.Add("-Version");
-                nugetArguments.Add(version);
-
-                _logger.Verbose(
-                    "'{ArborBuildNuGetPackageVersion}' flag is set, using specific version of Arbor.X: {Version}",
-                    WellKnownVariables.ArborBuildNuGetPackageVersion,
-                    version);
-            }
-            else
-            {
-                _logger.Verbose("'{ArborBuildNuGetPackageVersion}' flag is not set, using latest version of Arbor.X",
-                    WellKnownVariables.ArborBuildNuGetPackageVersion);
-
-                bool allowPrerelease;
-
-                if (_startOptions.PreReleaseEnabled.HasValue)
-                {
-                    allowPrerelease = _startOptions.PreReleaseEnabled.Value;
-
-                    if (allowPrerelease)
-                    {
-                        _logger.Verbose(
-                            "Pre-release option is set via start options, using latest version of Arbor.X allowing prerelease versions");
-                    }
-                }
-                else
-                {
-
-                    allowPrerelease = preReleaseIsAllowed;
-
-                    if (allowPrerelease)
-                    {
-                        _logger.Verbose(
-                            "'{AllowPrerelease}' flag is set, using latest version of Arbor.X allowing prerelease versions",
-                            WellKnownVariables.AllowPrerelease);
-                    }
-                    else
-                    {
-                        _logger.Verbose("'{AllowPrerelease}' flag is not set, using latest stable version of Arbor.X",
-                            WellKnownVariables.AllowPrerelease);
-                    }
-                }
-
-                if (allowPrerelease)
-                {
-                    nugetArguments.Add("-Prerelease");
-                }
-            }
-
-            ExitCode exitCode;
-            using (var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromSeconds(MaxBuildTimeInSeconds)))
-            {
-                exitCode = await ProcessRunner.ExecuteProcessAsync(nugetExePath,
-                        arguments: nugetArguments,
-                        cancellationToken: cancellationTokenSource.Token,
-                        standardOutLog: _logger.Information,
-                        standardErrorAction: _logger.Error,
-                        toolAction: _logger.Debug,
-                        verboseAction: _logger.Verbose)
+                _logger.Information("Retrying package download of {PackageVersion} with latest downloaded", packageVersion);
+                nuGetPackageInstallResult = await nuGetPackageInstaller.InstallPackageAsync(
+                        new NuGetPackage(nuGetPackage.NuGetPackageId, NuGetPackageVersion.LatestDownloaded),
+                        nugetPackageSettings)
                     .ConfigureAwait(false);
             }
 
-            if (!exitCode.IsSuccess)
+            if (nuGetPackageInstallResult?.SemanticVersion is null || nuGetPackageInstallResult?.PackageDirectory is null)
             {
-                outputDirectoryPath = string.Empty;
+                throw new InvalidOperationException($"Could not download {packageVersion}, verify it exists and that all sources are available");
             }
 
-            return outputDirectoryPath;
-        }
-
-        private async Task<string?> GetLatestVersionAsync(string nugetExePath, string nuGetSource, bool allowPreRelease)
-        {
-            using var cancellationTokenSource = new CancellationTokenSource(TimeSpan.FromSeconds(MaxBuildTimeInSeconds));
-            var nugetArguments = new List<string> { "list", BuildToolPackageName };
-
-            if (!string.IsNullOrWhiteSpace(nuGetSource))
-            {
-                nugetArguments.Add("-source");
-                nugetArguments.Add(nuGetSource);
-            }
-
-            if (allowPreRelease)
-            {
-                nugetArguments.Add("-Prerelease");
-            }
-
-            var lines = new List<string>();
-
-            ExitCode exitCode = await ProcessRunner.ExecuteProcessAsync(nugetExePath,
-                    arguments: nugetArguments,
-                    cancellationToken: cancellationTokenSource.Token,
-                    standardOutLog: (m, _) => lines.Add(m),
-                    standardErrorAction: _logger.Error,
-                    toolAction: _logger.Debug,
-                    verboseAction: _logger.Verbose)
-                .ConfigureAwait(false);
-
-            if (!exitCode.IsSuccess)
-            {
-                return null;
-            }
-
-            const string arborBuildPackageName = BuildToolPackageName + " ";
-            ImmutableArray<SemanticVersion> matchingPackages =
-                lines.Where(line => line.StartsWith(arborBuildPackageName, StringComparison.OrdinalIgnoreCase))
-                    .Select(line => line.Replace(arborBuildPackageName, "", StringComparison.OrdinalIgnoreCase))
-                    .Select(line => (SemanticVersion.TryParse(line, out SemanticVersion semVer), semVer))
-                    .Where(s => s.Item1)
-                    .Select(s => s.semVer)
-                    .ToImmutableArray();
-
-            if (matchingPackages.Length == 0)
-            {
-                return null;
-            }
-
-            if (matchingPackages.Length == 1)
-            {
-                return matchingPackages.Single().ToNormalizedString();
-            }
-
-            return matchingPackages.Max().ToNormalizedString();
+            return nuGetPackageInstallResult.PackageDirectory.FullName;
         }
 
         private async Task<string> GetBaseDirectoryAsync(BootstrapStartOptions startOptions)
@@ -599,7 +442,7 @@ namespace Arbor.Build.Core.Bootstrapper
                 _logger,
                 addProcessNameAsLogCategory: true,
                 addProcessRunnerCategory: true,
-                parentPrefix: _Prefix).ConfigureAwait(false);
+                parentPrefix: Prefix).ConfigureAwait(false);
 
             if (!cloneExitCode.IsSuccess)
             {
@@ -670,9 +513,7 @@ namespace Arbor.Build.Core.Bootstrapper
 
         private async Task<ExitCode> RunBuildToolsAsync(string buildDir, string buildToolDirectoryName)
         {
-            string buildToolDirectoryPath = Path.Combine(buildDir, buildToolDirectoryName);
-
-            var buildToolDirectory = new DirectoryInfo(buildToolDirectoryPath);
+            var buildToolDirectory = new DirectoryInfo(buildToolDirectoryName);
 
             List<FileInfo> arborBuild =
                 buildToolDirectory.GetFiles("Arbor.Build.dll", SearchOption.TopDirectoryOnly)
@@ -681,14 +522,14 @@ namespace Arbor.Build.Core.Bootstrapper
 
             if (arborBuild.Count != 1)
             {
-                PrintInvalidExeFileCount(arborBuild, buildToolDirectoryPath);
+                PrintInvalidExeFileCount(arborBuild, buildToolDirectory.FullName);
                 return ExitCode.Failure;
             }
 
             FileInfo buildToolExecutable = arborBuild.Single();
 
             const string timeoutKey = WellKnownVariables.BuildToolTimeoutInSeconds;
-            string timeoutInSecondsFromEnvironment = Environment.GetEnvironmentVariable(timeoutKey);
+            string? timeoutInSecondsFromEnvironment = Environment.GetEnvironmentVariable(timeoutKey);
 
             if (timeoutInSecondsFromEnvironment.TryParseInt32(out int parseResult, MaxBuildTimeInSeconds))
             {
@@ -709,7 +550,7 @@ namespace Arbor.Build.Core.Bootstrapper
                     ImmutableArray<IVariable>.Empty,
                     cancellationTokenSource.Token).ConfigureAwait(false);
 
-                string dotnetExePath = variables.SingleOrDefault(variable =>
+                string? dotnetExePath = variables.SingleOrDefault(variable =>
                     variable.Key.Equals(WellKnownVariables.DotNetExePath, StringComparison.OrdinalIgnoreCase))?.Value;
 
                 if (string.IsNullOrWhiteSpace(dotnetExePath))
@@ -718,7 +559,7 @@ namespace Arbor.Build.Core.Bootstrapper
                     return ExitCode.Failure;
                 }
 
-                string[] arguments = { buildToolExecutable.FullName };
+                string[] arguments = { buildToolExecutable.FullName, "--", $"-buildDirectory={buildDir}" };
 
                 result = await ProcessRunner.ExecuteProcessAsync(dotnetExePath,
                         arguments,
@@ -737,8 +578,8 @@ namespace Arbor.Build.Core.Bootstrapper
         {
             string multiple =
                 $"Found {exeFiles.Count} such files: {string.Join(", ", exeFiles.Select(file => file.Name))}";
-            const string Single = ". Found no such files";
-            string found = exeFiles.Count > 0 ? Single : multiple;
+            const string single = ". Found no such files";
+            string found = exeFiles.Count > 0 ? single : multiple;
 
             _logger.Error(
                 "Expected directory {BuildToolDirectoryPath} to contain exactly one executable file with extensions .exe. {Found}",

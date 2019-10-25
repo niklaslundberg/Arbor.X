@@ -39,7 +39,7 @@ namespace Arbor.Build.Core
 
         private static void RegisterSourceRootConditionally(string? sourceDirectory, ContainerBuilder builder)
         {
-            if (sourceDirectory != null)
+            if (!string.IsNullOrWhiteSpace(sourceDirectory))
             {
                 builder.RegisterModule(new BuildVariableModule(sourceDirectory));
             }
@@ -68,7 +68,7 @@ namespace Arbor.Build.Core
                             && type.HasSingleDefaultConstructor()))
                 .Select(type => Activator.CreateInstance(type) as IModule)
                 .Where(module => module != null)
-                .ToArray();
+                .ToArray()!;
 
             return modules;
         }

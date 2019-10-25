@@ -8,6 +8,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using Arbor.Build.Core.BuildVariables;
+using Arbor.Build.Core.Tools.Git;
 using Arbor.Defensive.Collections;
 using Arbor.Processing;
 using JetBrains.Annotations;
@@ -31,7 +32,8 @@ namespace Arbor.Build.Core.Tools.NuGet
             int timeoutInSeconds,
             bool checkNuGetPackagesExists,
             bool timeoutIncreaseEnabled,
-            string? sourceName)
+            string? sourceName,
+            string? configFile)
         {
             if (!File.Exists(nugetPackage))
             {
@@ -43,6 +45,12 @@ namespace Arbor.Build.Core.Tools.NuGet
             logger.Debug("Pushing NuGet package '{NugetPackage}'", nugetPackage);
 
             var args = new List<string> { "push", nugetPackage };
+
+            if (!string.IsNullOrWhiteSpace(configFile))
+            {
+                args.Add("-ConfigFile");
+                args.Add(configFile);
+            }
 
             if (!string.IsNullOrWhiteSpace(serverUri))
             {
@@ -168,6 +176,7 @@ namespace Arbor.Build.Core.Tools.NuGet
             int timeoutInSeconds,
             bool checkNuGetPackagesExists,
             string? sourceName,
+            string? configFile,
             bool timeoutIncreaseEnabled)
         {
             if (artifactPackagesDirectory == null)
@@ -290,7 +299,8 @@ namespace Arbor.Build.Core.Tools.NuGet
                     timeoutInSeconds,
                     checkNuGetPackagesExists,
                     timeoutIncreaseEnabled,
-                    sourceName).ConfigureAwait(false);
+                    sourceName,
+                    configFile).ConfigureAwait(false);
 
                 if (!exitCode.IsSuccess)
                 {
@@ -318,7 +328,7 @@ namespace Arbor.Build.Core.Tools.NuGet
             string packageVersion;
             string packageId;
 
-            await using (var fs = new FileStream(nugetPackage.FullName, FileMode.Open, FileAccess.Read))
+            using (var fs = new FileStream(nugetPackage.FullName, FileMode.Open, FileAccess.Read))
             {
                 using var archive = new ZipArchive(fs);
                 ZipArchiveEntry nuspecEntry =
@@ -345,7 +355,7 @@ namespace Arbor.Build.Core.Tools.NuGet
 
             var packageInfo = new { Id = packageId, Version = expectedVersion };
 
-            var args = new List<string> { "list", packageId };
+            var args = new List<string> { "list", $"packageid:{packageId}" };
 
             if (!string.IsNullOrWhiteSpace(sourceName))
             {
@@ -453,6 +463,9 @@ namespace Arbor.Build.Core.Tools.NuGet
             bool forceUpload =
                 buildVariables.GetBooleanByKey(WellKnownVariables.ExternalTools_NuGetServer_ForceUploadEnabled);
 
+            bool uploadOnFeatureBranches =
+                buildVariables.GetBooleanByKey(WellKnownVariables.ExternalTools_NuGetServer_UploadFeatureBranchEnabled);
+
             bool timeoutIncreaseEnabled =
                 buildVariables.GetBooleanByKey(
                     WellKnownVariables.ExternalTools_NuGetServer_UploadTimeoutIncreaseEnabled);
@@ -468,9 +481,21 @@ namespace Arbor.Build.Core.Tools.NuGet
                     WellKnownVariables.ExternalTools_NuGetServer_SourceName,
                     string.Empty);
 
+            string? configFile =
+                buildVariables.GetVariableValueOrDefault(
+                    WellKnownVariables.ExternalTools_NuGetServer_ConfigFile,
+                    string.Empty);
+
             if (isRunningOnBuildAgent)
             {
                 logger.Information("NuGet package upload is enabled");
+            }
+
+            string branchName = buildVariables.GetVariableValueOrDefault(WellKnownVariables.BranchName, "")!;
+
+            if (new BranchName(branchName).IsFeatureBranch() && !uploadOnFeatureBranches)
+            {
+                logger.Information("Package upload is not enabled for feature branches");
             }
 
             if (!isRunningOnBuildAgent && forceUpload)
@@ -493,6 +518,7 @@ namespace Arbor.Build.Core.Tools.NuGet
                     timeoutInSeconds,
                     checkNuGetPackagesExists,
                     sourceName,
+                    configFile,
                     timeoutIncreaseEnabled);
             }
 

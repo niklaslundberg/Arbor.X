@@ -22,7 +22,7 @@ namespace Arbor.Build.Core.BuildVariables
             _defaultValue = defaultValue;
         }
 
-        public string WellknownName => _wellKnownName ?? string.Empty;
+        public string WellKnownName => _wellKnownName ?? string.Empty;
 
         public string DefaultValue => _defaultValue ?? string.Empty;
 
@@ -49,8 +49,8 @@ namespace Arbor.Build.Core.BuildVariables
         public static VariableDescription Create(
             string invariantName,
             string? description = null,
-            string? wellknownName = null,
-            string? defaultValue = null) => new VariableDescription(invariantName, description, wellknownName, defaultValue);
+            string? wellKnownName = null,
+            string? defaultValue = null) => new VariableDescription(invariantName, description, wellKnownName, defaultValue);
 
         public bool Equals(VariableDescription other)
         {
@@ -64,7 +64,7 @@ namespace Arbor.Build.Core.BuildVariables
                 return true;
             }
 
-            return string.Equals(InvariantName, other.InvariantName);
+            return string.Equals(InvariantName, other.InvariantName, StringComparison.Ordinal);
         }
 
         public override bool Equals(object obj)
@@ -79,11 +79,11 @@ namespace Arbor.Build.Core.BuildVariables
                 return true;
             }
 
-            return obj is VariableDescription && Equals((VariableDescription)obj);
+            return obj is VariableDescription description && Equals(description);
         }
 
         public override int GetHashCode() => InvariantName != null ? InvariantName.GetHashCode(StringComparison.InvariantCulture) : 0;
 
-        public override string ToString() => $"{InvariantName} ({WellknownName}) [{DefaultValue}], {Description}";
+        public override string ToString() => $"{InvariantName} ({WellKnownName}) [{DefaultValue}], {Description}";
     }
 }

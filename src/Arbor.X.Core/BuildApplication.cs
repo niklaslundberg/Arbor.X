@@ -31,105 +31,17 @@ namespace Arbor.Build.Core
 {
     public class BuildApplication
     {
+        private readonly bool _debugEnabled;
         private readonly ILogger _logger;
+        private readonly bool _verboseEnabled;
         private CancellationToken _cancellationToken;
         private IContainer? _container;
-        private readonly bool _verboseEnabled;
-        private readonly bool _debugEnabled;
 
         public BuildApplication(ILogger logger)
         {
             _logger = logger ?? Logger.None ?? throw new ArgumentNullException(nameof(logger));
             _verboseEnabled = _logger.IsEnabled(LogEventLevel.Verbose);
             _debugEnabled = _logger.IsEnabled(LogEventLevel.Debug);
-        }
-
-        public async Task<ExitCode> RunAsync(string[] args)
-        {
-            MultiSourceKeyValueConfiguration multiSourceKeyValueConfiguration = KeyValueConfigurationManager
-                .Add(new UserJsonConfiguration())
-                .Add(new EnvironmentVariableKeyValueConfigurationSource())
-                .Build();
-
-            StaticKeyValueConfigurationManager.Initialize(multiSourceKeyValueConfiguration);
-
-            const bool debugLoggerEnabled = false;
-
-            string? sourceDir = null;
-
-            if (DebugHelper.IsDebugging)
-            {
-                sourceDir = await StartWithDebuggerAsync(args).ConfigureAwait(false);
-            }
-
-            _container = await BuildBootstrapper.StartAsync(_logger, sourceDir).ConfigureAwait(false);
-
-            _logger.Information("Using logger '{Type}'", _logger.GetType());
-
-            _cancellationToken = CancellationToken.None;
-
-            ExitCode exitCode;
-
-            var stopwatch = new Stopwatch();
-            stopwatch.Start();
-
-            try
-            {
-                ExitCode systemToolsResult = await RunSystemToolsAsync().ConfigureAwait(false);
-
-                if (!systemToolsResult.IsSuccess)
-                {
-                    const string ToolsMessage = "All system tools did not succeed";
-
-                    _logger.Error(ToolsMessage);
-
-                    exitCode = systemToolsResult;
-                }
-                else
-                {
-                    exitCode = ExitCode.Success;
-                    _logger.Information("All tools succeeded");
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.Error(ex, "Error running builds tools");
-                exitCode = ExitCode.Failure;
-            }
-
-            stopwatch.Stop();
-
-            _logger.Information("Arbor.X.Build total elapsed time in seconds: {TotalSeconds:F}",
-                stopwatch.Elapsed.TotalSeconds);
-
-            _ = multiSourceKeyValueConfiguration[WellKnownVariables.BuildApplicationExitDelayInMilliseconds]
-                .TryParseInt32(out int exitDelayInMilliseconds, 50);
-
-            if (exitDelayInMilliseconds > 0)
-            {
-                if (_debugEnabled)
-                {
-                    _logger.Debug(
-                        "Delaying build application exit with {ExitDelayInMilliseconds} milliseconds specified in '{BuildApplicationExitDelayInMilliseconds}'",
-                        exitDelayInMilliseconds,
-                        WellKnownVariables.BuildApplicationExitDelayInMilliseconds);
-                }
-
-                await Task.Delay(TimeSpan.FromMilliseconds(exitDelayInMilliseconds), _cancellationToken)
-                    .ConfigureAwait(false);
-            }
-
-            if (Debugger.IsAttached)
-            {
-                WriteDebug($"Exiting build application with exit code {exitCode}");
-
-                if (!debugLoggerEnabled)
-                {
-                    Debugger.Break();
-                }
-            }
-
-            return exitCode;
         }
 
         private static string BuildResultsAsTable(IReadOnlyCollection<ToolResult> toolResults)
@@ -142,26 +54,19 @@ namespace Arbor.Build.Core
                     result =>
                         new Dictionary<string, string>
                         {
+                            { "Tool", result.ToolWithPriority.Tool.Name() },
                             {
-                                "Tool",
-                                result.ToolWithPriority.Tool.Name()
-                            },
-                            {
-                                "Result",
-                                result.ResultType.WasRun
-                                    ? (result.ResultType.IsSuccess ? Succeeded : Failed)
+                                "Result", result.ResultType.WasRun
+                                    ? result.ResultType.IsSuccess ? Succeeded : Failed
                                     : NotRun
                             },
                             {
-                                "Execution time",
-                                result.ExecutionTime == default
+                                "Execution time", result.ExecutionTime == default
                                     ? "N/A"
-                                    : ((int)result.ExecutionTime.TotalMilliseconds).ToString("D", CultureInfo.InvariantCulture) + " ms"
+                                    : ((int)result.ExecutionTime.TotalMilliseconds).ToString("D",
+                                          CultureInfo.InvariantCulture) + " ms"
                             },
-                            {
-                                "Message",
-                                result.Message
-                            }
+                            { "Message", result.Message }
                         })
                 .DisplayAsTable();
 
@@ -181,6 +86,11 @@ namespace Arbor.Build.Core
             {
                 Console.WriteLine("Enter base directory");
                 string baseDirectory = Console.ReadLine();
+
+                if (baseDirectory == "-")
+                {
+                    return "";
+                }
 
                 if (!string.IsNullOrWhiteSpace(baseDirectory))
                 {
@@ -223,19 +133,19 @@ namespace Arbor.Build.Core
         {
             IReadOnlyCollection<IVariable> buildVariables = await GetBuildVariablesAsync().ConfigureAwait(false);
 
-            string variableAsTable = WellKnownVariables.AllVariables
-                .OrderBy(item => item.InvariantName)
-                .Select(
-                    variable => new Dictionary<string, string>
-                    {
-                        { "Name", variable.InvariantName },
-                        { "Description", variable.Description },
-                        { "Default value", variable.DefaultValue }
-                    })
-                .DisplayAsTable();
-
             if (buildVariables.GetBooleanByKey(WellKnownVariables.ShowAvailableVariablesEnabled, true))
             {
+                string variableAsTable = WellKnownVariables.AllVariables
+                    .OrderBy(item => item.InvariantName)
+                    .Select(
+                        variable => new Dictionary<string, string>
+                        {
+                            { "Name", variable.InvariantName },
+                            { "Description", variable.Description },
+                            { "Default value", variable.DefaultValue }
+                        })
+                    .DisplayAsTable();
+
                 _logger.Information("{NewLine}Available wellknown variables: {NewLine1}{NewLine2}{VariableAsTable}",
                     Environment.NewLine,
                     Environment.NewLine,
@@ -295,7 +205,7 @@ namespace Arbor.Build.Core
 
                 _logger.Information("{Message}", message);
 
-                Stopwatch stopwatch = Stopwatch.StartNew();
+                var stopwatch = Stopwatch.StartNew();
 
                 try
                 {
@@ -372,15 +282,9 @@ namespace Arbor.Build.Core
             sb.AppendLine(toolWithPriorities.Select(tool =>
                     new Dictionary<string, string>
                     {
-                        {
-                            "Tool", tool.Tool.Name()
-                        },
-                        {
-                            "Priority", tool.Priority.ToString(CultureInfo.InvariantCulture)
-                        },
-                        {
-                            "Run always", tool.RunAlways ? "Run always" : string.Empty
-                        }
+                        { "Tool", tool.Tool.Name() },
+                        { "Priority", tool.Priority.ToString(CultureInfo.InvariantCulture) },
+                        { "Run always", tool.RunAlways ? "Run always" : string.Empty }
                     })
                 .DisplayAsTable());
 
@@ -401,7 +305,9 @@ namespace Arbor.Build.Core
                     WellKnownVariables.VariableFileSourceEnabled);
 
                 var files = new List<string>
-                    { "arborx_environmentvariables.json", "arborx_environmentvariables.json.user" };
+                {
+                    "arborbuild_environmentvariables.json", "arborbuild_environmentvariables.json.user"
+                };
 
                 foreach (string configFile in files)
                 {
@@ -462,7 +368,10 @@ namespace Arbor.Build.Core
                     string values;
                     if (newVariables.Length > 0)
                     {
-                        Dictionary<string, string>[] providerTable = { newVariables.ToDictionary(s => s.Key, s => s.Value) };
+                        Dictionary<string, string>[] providerTable =
+                        {
+                            newVariables.ToDictionary(s => s.Key, s => s.Value)
+                        };
                         values = providerTable.DisplayAsTable();
                     }
                     else
@@ -479,9 +388,11 @@ namespace Arbor.Build.Core
                 {
                     if (buildVariables.HasKey(variable.Key))
                     {
-                        IVariable existing = buildVariables.Single(bv => bv.Key.Equals(variable.Key, StringComparison.OrdinalIgnoreCase));
+                        IVariable existing = buildVariables.Single(bv =>
+                            bv.Key.Equals(variable.Key, StringComparison.OrdinalIgnoreCase));
 
-                        if (string.IsNullOrWhiteSpace(buildVariables.GetVariableValueOrDefault(variable.Key, string.Empty)))
+                        if (string.IsNullOrWhiteSpace(
+                            buildVariables.GetVariableValueOrDefault(variable.Key, string.Empty)))
                         {
                             if (string.IsNullOrWhiteSpace(variable.Value))
                             {
@@ -536,7 +447,7 @@ namespace Arbor.Build.Core
                 }
             }
 
-            AddCompatibilityVariables(buildVariables);
+            buildVariables.AddCompatibilityVariables(_logger);
 
             List<IVariable> sorted = buildVariables
                 .OrderBy(variable => variable.Key)
@@ -545,108 +456,12 @@ namespace Arbor.Build.Core
             return sorted;
         }
 
-        private void AddCompatibilityVariables(List<IVariable> buildVariables)
-        {
-            IVariable[] buildVariableArray = buildVariables.ToArray();
-
-            var alreadyDefined = new List<Dictionary<string, string>>();
-            var compatibilities = new List<Dictionary<string, string>>();
-
-            foreach (IVariable buildVariable in buildVariableArray)
-            {
-                if (!buildVariable.Key.StartsWithAny(new[] { ArborConstants.ArborBuild, ArborConstants.ArborX },
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                string compatibilityName = buildVariable.Key.Replace(".", "_", StringComparison.InvariantCulture);
-
-                if (
-                    buildVariables.Any(
-                        bv => bv.Key.Equals(compatibilityName, StringComparison.OrdinalIgnoreCase)))
-                {
-                    alreadyDefined.Add(new Dictionary<string, string>
-                    {
-                        { "Name", buildVariable.Key },
-                        { "Value", buildVariable.Key.GetDisplayValue(buildVariable.Value) }
-                    });
-                }
-                else
-                {
-                    compatibilities.Add(new Dictionary<string, string>
-                    {
-                        { "Name", buildVariable.Key },
-                        { "Compatibility name", compatibilityName },
-                        { "Value", buildVariable.Key.GetDisplayValue(buildVariable.Value) }
-                    });
-
-                    buildVariables.Add(new BuildVariable(compatibilityName, buildVariable.Value));
-                }
-            }
-
-            if (alreadyDefined.Count > 0)
-            {
-                string alreadyDefinedMessage =
-                    $"{Environment.NewLine}Compatibility build variables alread defined {Environment.NewLine}{Environment.NewLine}{alreadyDefined.DisplayAsTable()}{Environment.NewLine}";
-
-                _logger.Warning("{AlreadyDefined}", alreadyDefinedMessage);
-            }
-
-            if (compatibilities.Count > 0 && _verboseEnabled)
-            {
-                string compatibility =
-                    $"{Environment.NewLine}Compatibility build variables added {Environment.NewLine}{Environment.NewLine}{compatibilities.DisplayAsTable()}{Environment.NewLine}";
-
-                _logger.Verbose("{CompatibilityVariables}", compatibility);
-            }
-
-            IVariable arborXBranchName =
-                buildVariables.SingleOrDefault(
-                    var => var.Key.Equals(WellKnownVariables.BranchName, StringComparison.OrdinalIgnoreCase));
-
-            if (arborXBranchName != null && !string.IsNullOrWhiteSpace(arborXBranchName.Value))
-            {
-                const string BranchKey = "branch";
-                const string BranchNameKey = "branchName";
-
-                if (!buildVariables.Any(var => var.Key.Equals(BranchKey, StringComparison.OrdinalIgnoreCase)))
-                {
-                    if (_verboseEnabled)
-                    {
-                        _logger.Verbose(
-                            "Build variable with key '{BranchKey}' was not defined, using value from variable key {Key} ('{Value}')",
-                            BranchKey,
-                            arborXBranchName.Key,
-                            arborXBranchName.Value);
-                    }
-
-                    buildVariables.Add(new BuildVariable(BranchKey, arborXBranchName.Value));
-                }
-
-                if (
-                    !buildVariables.Any(
-                        var => var.Key.Equals(BranchNameKey, StringComparison.OrdinalIgnoreCase)))
-                {
-                    if (_verboseEnabled)
-                    {
-                        _logger.Verbose(
-                            "Build variable with key '{BranchNameKey}' was not defined, using value from variable key {Key} ('{Value}')",
-                            BranchNameKey,
-                            arborXBranchName.Key,
-                            arborXBranchName.Value);
-                    }
-
-                    buildVariables.Add(new BuildVariable(BranchNameKey, arborXBranchName.Value));
-                }
-            }
-        }
 
         private ImmutableArray<BuildVariable> CheckEnvironmentLinesInVariables()
         {
             var variables = new Dictionary<string, string>();
 
-            List<KeyValuePair<string, string>> newLines =
+            var newLines =
                 variables.Where(item => item.Value.Contains(Environment.NewLine, StringComparison.Ordinal)).ToList();
 
             if (newLines.Count > 0)
@@ -667,6 +482,103 @@ namespace Arbor.Build.Core
             }
 
             return variables.Select(item => new BuildVariable(item.Key, item.Value)).ToImmutableArray();
+        }
+
+        public async Task<ExitCode> RunAsync(string[] args)
+        {
+            MultiSourceKeyValueConfiguration multiSourceKeyValueConfiguration = KeyValueConfigurationManager
+                .Add(new UserJsonConfiguration())
+                .Add(new EnvironmentVariableKeyValueConfigurationSource())
+                .Build();
+
+            string? buildDirArg = args
+                .FirstOrDefault(arg => arg.StartsWith("-buildDirectory=", StringComparison.OrdinalIgnoreCase))
+                ?.Split('=').LastOrDefault();
+
+            if (!string.IsNullOrWhiteSpace(buildDirArg) && Directory.Exists(buildDirArg))
+            {
+                Directory.SetCurrentDirectory(buildDirArg);
+            }
+
+            StaticKeyValueConfigurationManager.Initialize(multiSourceKeyValueConfiguration);
+
+            const bool debugLoggerEnabled = false;
+
+            string? sourceDir = null;
+
+            if (DebugHelper.IsDebugging)
+            {
+                sourceDir = await StartWithDebuggerAsync(args).ConfigureAwait(false);
+            }
+
+            _container = await BuildBootstrapper.StartAsync(_logger, sourceDir).ConfigureAwait(false);
+
+            _logger.Information("Using logger '{Type}'", _logger.GetType());
+
+            _cancellationToken = CancellationToken.None;
+
+            ExitCode exitCode;
+
+            var stopwatch = new Stopwatch();
+            stopwatch.Start();
+
+            try
+            {
+                ExitCode systemToolsResult = await RunSystemToolsAsync().ConfigureAwait(false);
+
+                if (!systemToolsResult.IsSuccess)
+                {
+                    const string ToolsMessage = "All system tools did not succeed";
+
+                    _logger.Error(ToolsMessage);
+
+                    exitCode = systemToolsResult;
+                }
+                else
+                {
+                    exitCode = ExitCode.Success;
+                    _logger.Information("All tools succeeded");
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.Error(ex, "Error running builds tools");
+                exitCode = ExitCode.Failure;
+            }
+
+            stopwatch.Stop();
+
+            _logger.Information("Arbor.Build.Build total elapsed time in seconds: {TotalSeconds:F}",
+                stopwatch.Elapsed.TotalSeconds);
+
+            _ = multiSourceKeyValueConfiguration[WellKnownVariables.BuildApplicationExitDelayInMilliseconds]
+                .TryParseInt32(out int exitDelayInMilliseconds, 50);
+
+            if (exitDelayInMilliseconds > 0)
+            {
+                if (_debugEnabled)
+                {
+                    _logger.Debug(
+                        "Delaying build application exit with {ExitDelayInMilliseconds} milliseconds specified in '{BuildApplicationExitDelayInMilliseconds}'",
+                        exitDelayInMilliseconds,
+                        WellKnownVariables.BuildApplicationExitDelayInMilliseconds);
+                }
+
+                await Task.Delay(TimeSpan.FromMilliseconds(exitDelayInMilliseconds), _cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            if (Debugger.IsAttached)
+            {
+                WriteDebug($"Exiting build application with exit code {exitCode}");
+
+                if (!debugLoggerEnabled)
+                {
+                    Debugger.Break();
+                }
+            }
+
+            return exitCode;
         }
     }
 }

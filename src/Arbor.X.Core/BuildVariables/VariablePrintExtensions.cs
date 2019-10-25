@@ -14,9 +14,9 @@ namespace Arbor.Build.Core.BuildVariables
                 throw new ArgumentNullException(nameof(variables));
             }
 
-            IEnumerable<Dictionary<string, string>> dictionaries =
+            IEnumerable<Dictionary<string, string?>> dictionaries =
                 variables.Select(
-                    variable => new Dictionary<string, string>
+                    variable => new Dictionary<string, string?>
                     {
                         { "Name", variable.Key },
                         { "Value", variable.Key.GetDisplayValue(variable.Value) }
@@ -25,7 +25,7 @@ namespace Arbor.Build.Core.BuildVariables
             return dictionaries.DisplayAsTable();
         }
 
-        private static readonly string[] SensitiveValues = { "password", "apikey", "username", "pw", "token", "jwt" };
+        private static readonly string[] SensitiveValues = { "password", "apikey", "username", "pw", "token", "jwt", "connectionstring" };
 
         public static string DisplayPair(this IVariable variable)
         {
@@ -34,14 +34,23 @@ namespace Arbor.Build.Core.BuildVariables
                 throw new ArgumentNullException(nameof(variable));
             }
 
-            string value = GetDisplayValue(variable.Key, variable.Value);
+            string? value = GetDisplayValue(variable.Key, variable.Value);
 
             return $"\t{variable.Key}: {value}";
         }
 
-        public static string GetDisplayValue(this string key, string value)
+        public static string? GetDisplayValue(this string key, string? value)
         {
-            if (SensitiveValues.Any(sensitive => key.IndexOf(sensitive, StringComparison.OrdinalIgnoreCase) >= 0))
+            if (SensitiveValues.Any(sensitive =>
+            {
+                var comparisonType = StringComparison.OrdinalIgnoreCase;
+
+                return key
+                           .Replace("-", "", comparisonType)
+                           .Replace("_", "", comparisonType)
+                           .Replace(".", "", comparisonType)
+                           .IndexOf(sensitive, comparisonType) >= 0;
+            }))
             {
                 value = "*****";
             }

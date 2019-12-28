@@ -33,7 +33,7 @@ namespace Arbor.Build.Core.Tools.MSBuild
 {
     [Priority(300)]
     [UsedImplicitly]
-    public class SolutionBuilder : ITool
+    public class SolutionBuilder : ITool, IReportLogTail
     {
         private readonly List<FileAttributes> _blackListedByAttributes = new List<FileAttributes>
         {
@@ -109,7 +109,14 @@ namespace Arbor.Build.Core.Tools.MSBuild
         private MSBuildVerbosityLevel _verbosity;
         private string _version;
 
-        public SolutionBuilder(BuildContext buildContext) => _buildContext = buildContext;
+        public SolutionBuilder(BuildContext buildContext)
+        {
+            _buildContext = buildContext;
+            LogTail = new FixedSizedQueue<string>()
+            {
+                Limit = 5
+            };
+        }
 
         private static int ProcessorCount(IReadOnlyCollection<IVariable> buildVariables)
         {
@@ -632,19 +639,24 @@ namespace Arbor.Build.Core.Tools.MSBuild
                 _verboseLoggingEnabled ? logger.Verbose : (Action<string, string>?) null;
             Action<string, string>? debugAction = _verboseLoggingEnabled ? logger.Debug : (Action<string, string>?)null;
 
+            void LogDefault(string message, string category)
+            {
+                logger.Information("{Category} {Message}", category, message);
+                LogTail.Enqueue($"{category} {message}");
+            }
+
             ExitCode exitCode =
                 await
                     ProcessRunner.ExecuteProcessAsync(
                             _msBuildExe,
                             argList,
-                            logger.Information,
+                            standardOutLog: LogDefault,
                             logger.Error,
                             debugAction,
                             debugAction: debugAction,
                             cancellationToken: _cancellationToken,
                             verboseAction: verboseAction)
                         .ConfigureAwait(false);
-
 
             if (exitCode.IsSuccess)
             {
@@ -709,7 +721,7 @@ namespace Arbor.Build.Core.Tools.MSBuild
 
             if (exitCode.IsSuccess)
             {
-                exitCode = await PublishPdbFilesAynsc(configuration, platform).ConfigureAwait(false);
+                exitCode = await PublishPdbFilesAsync(configuration, platform).ConfigureAwait(false);
             }
             else
             {
@@ -816,7 +828,7 @@ namespace Arbor.Build.Core.Tools.MSBuild
                         args.Add($"/p:version={packageVersion}");
                         args.Add("--output");
 
-                        var tempDirPath = Path.Combine(Path.GetTempPath(), "Arbor.Build-pkg" + DateTime.UtcNow.Ticks);
+                        string tempDirPath = Path.Combine(Path.GetTempPath(), "Arbor.Build-pkg" + DateTime.UtcNow.Ticks);
                         tempDirectory = new DirectoryInfo(tempDirPath);
                         tempDirectory.EnsureExists();
 
@@ -863,7 +875,7 @@ namespace Arbor.Build.Core.Tools.MSBuild
 
                                     if (!File.Exists(targetFile))
                                     {
-                                        nugetPackage.CopyTo(targetFile);
+                                        nugetPackage.CopyTo(targetFile, true);
                                     }
                                 }
                             }
@@ -912,6 +924,8 @@ namespace Arbor.Build.Core.Tools.MSBuild
 
             foreach (SolutionProject solutionProject in exeProjects)
             {
+                EnsureFileDates(new DirectoryInfo(solutionProject.ProjectDirectory));
+
                 string[] args =
                 {
                     "pack",
@@ -936,6 +950,33 @@ namespace Arbor.Build.Core.Tools.MSBuild
             }
 
             return ExitCode.Success;
+        }
+
+        private void EnsureFileDates(DirectoryInfo directoryInfo)
+        {
+            if (directoryInfo is null)
+            {
+                return;
+            }
+
+            var files = directoryInfo.GetFiles();
+
+            foreach (var fileInfo in files)
+            {
+                try
+                {
+                    fileInfo.FullName.EnsureHasValidDate(_logger);
+                }
+                catch (Exception ex)
+                {
+                    _logger.Error(ex, "Could not ensure dates for file '{File}'", fileInfo.FullName);
+                }
+            }
+
+            foreach (var subDirectory in directoryInfo.GetDirectories())
+            {
+                EnsureFileDates(subDirectory);
+            }
         }
 
         private string GetPackageVersion(bool isReleaseBuild)
@@ -981,7 +1022,7 @@ namespace Arbor.Build.Core.Tools.MSBuild
             }
         }
 
-        private Task<ExitCode> PublishPdbFilesAynsc(string configuration, string platform)
+        private Task<ExitCode> PublishPdbFilesAsync(string configuration, string platform)
         {
             string message = _pdbArtifactsEnabled
                 ? $"Publishing PDB artifacts for configuration {configuration} and platform {platform}"
@@ -2461,5 +2502,7 @@ namespace Arbor.Build.Core.Tools.MSBuild
                 return ExitCode.Failure;
             }
         }
+
+        public FixedSizedQueue<string> LogTail { get; }
     }
 }

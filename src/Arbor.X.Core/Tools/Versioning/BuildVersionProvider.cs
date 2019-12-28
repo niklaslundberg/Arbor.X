@@ -21,6 +21,10 @@ namespace Arbor.Build.Core.Tools.Versioning
     [UsedImplicitly]
     public class BuildVersionProvider : IVariableProvider
     {
+        private readonly ITimeService _timeService;
+
+        public BuildVersionProvider(ITimeService timeService) => _timeService = timeService;
+
         public int Order => VariableProviderOrder.Ignored;
 
         public Task<ImmutableArray<IVariable>> GetBuildVariablesAsync(
@@ -119,9 +123,9 @@ namespace Arbor.Build.Core.Tools.Versioning
 
                     if (required.All(ValidateVersionNumber))
                     {
-                        major = required[majorKey].ParseOrDefault();
-                        minor = required[minorKey].ParseOrDefault();
-                        patch = required[patchKey].ParseOrDefault();
+                        major = required[majorKey].ParseOrDefault(-1);
+                        minor = required[minorKey].ParseOrDefault(-1);
+                        patch = required[patchKey].ParseOrDefault(-1);
 
                         logger.Verbose(
                             "All version numbers from the version file '{VersionFileName}' were parsed successfully",
@@ -145,31 +149,34 @@ namespace Arbor.Build.Core.Tools.Versioning
 
             int envMajor =
                 environmentVariables.Where(item => item.Key == WellKnownVariables.VersionMajor)
-                    .Select(item => (int?)int.Parse(item.Value))
-                    .SingleOrDefault() ?? -1;
-            int envMinor =
-                environmentVariables.Where(item => item.Key == WellKnownVariables.VersionMinor)
-                    .Select(item => (int?)int.Parse(item.Value))
-                    .SingleOrDefault() ?? -1;
-            int envPatch =
-                environmentVariables.Where(item => item.Key == WellKnownVariables.VersionPatch)
-                    .Select(item => (int?)int.Parse(item.Value))
-                    .SingleOrDefault() ?? -1;
-            int envBuild =
-                environmentVariables.Where(item => item.Key == WellKnownVariables.VersionBuild)
-                    .Select(item => (int?)int.Parse(item.Value))
+                    .Select(item => (int?)int.Parse(item.Value, CultureInfo.InvariantCulture))
                     .SingleOrDefault() ?? -1;
 
-            int teamCityBuildVersion =
+            int envMinor =
+                environmentVariables.Where(item => item.Key == WellKnownVariables.VersionMinor)
+                    .Select(item => (int?)int.Parse(item.Value, CultureInfo.InvariantCulture))
+                    .SingleOrDefault() ?? -1;
+
+            int envPatch =
+                environmentVariables.Where(item => item.Key == WellKnownVariables.VersionPatch)
+                    .Select(item => (int?)int.Parse(item.Value, CultureInfo.InvariantCulture))
+                    .SingleOrDefault() ?? -1;
+
+            int envBuild =
+                environmentVariables.Where(item => item.Key == WellKnownVariables.VersionBuild)
+                    .Select(item => (int?)int.Parse(item.Value, CultureInfo.InvariantCulture))
+                    .SingleOrDefault() ?? -1;
+
+            int? teamCityBuildVersion =
                 environmentVariables.Where(item => item.Key == WellKnownVariables.TeamCityVersionBuild)
                     .Select(item =>
                     {
                         if (int.TryParse(item.Value, out int buildVersion) && buildVersion >= 0)
                         {
-                            return buildVersion;
+                            return (int?)buildVersion;
                         }
 
-                        return -1;
+                        return (int?)-1;
                     })
                     .SingleOrDefault();
 
@@ -217,13 +224,17 @@ namespace Arbor.Build.Core.Tools.Versioning
 
             if (build < 0)
             {
-                if (teamCityBuildVersion >= 0)
+                if (teamCityBuildVersion.HasValue)
                 {
-                    build = teamCityBuildVersion;
+                    build = teamCityBuildVersion.Value;
                     logger.Verbose(
                         "Found no build version, using version {Build} from TeamCity ({TeamCityVersionBuild})",
                         build,
                         WellKnownVariables.TeamCityVersionBuild);
+                }
+                else if (buildVariables.GetBooleanByKey(WellKnownVariables.BuildNumberAsUnixEpochSecondsEnabled))
+                {
+                    build = (int) _timeService.UtcNow().ToUnixTimeSeconds();
                 }
                 else
                 {
